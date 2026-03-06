@@ -30,7 +30,7 @@ echo "当前用户: $USERNAME"
 echo "家目录: $HOME_DIR"
 success "环境检查通过"
 
-info "===== 2. 优化 APT 镜像源（清华源）====="
+info "===== 2. 优化 APT 镜像源 (清华源) ====="
 UBUNTU_CODENAME=$(lsb_release -cs)
 
 if [ -f "/etc/apt/sources.list.d/ubuntu.sources" ]; then
@@ -139,16 +139,27 @@ if command -v cmake >/dev/null 2>&1; then
     success "CMake 已安装: $(cmake --version | head -n 1)"
 else
     cd /tmp
+    rm -f cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz*
     echo "正在下载 CMake ${CMAKE_VERSION} (可能受 GitHub 网络影响, 请耐心等待)..."
-    wget -q --show-progress https://gh-proxy.org/https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz \
+    wget -O "cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" -q --show-progress https://gh-proxy.org/https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz \
     || error "CMake 下载失败! \n建议: 1. 执行 \`proxy\` 命令开启终端代理后再运行脚本. 2. 手动下载后放在 /tmp 目录下"
+
+    echo "下载完毕, 开始解压..."
     tar -zxvf cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz > /dev/null || error "解压 CMake 压缩包失败"
+
     sudo rm -rf "/opt/cmake-${CMAKE_VERSION}-linux-x86_64"
     sudo mv "cmake-${CMAKE_VERSION}-linux-x86_64" /opt/ || error "移动 CMake 到 /opt 失败"
     sudo ln -sf /opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin/* /usr/local/bin/ || error "创建 CMake 软链接失败"
 
     rm "cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz"
     success "CMake ${CMAKE_VERSION} 安装成功"
+fi
+
+# 检查当前是否在交互式终端中 (判断标准输入是否连接到了终端)
+if [ -t 0 ]; then
+    INTERACTIVE=1
+else
+    INTERACTIVE=0
 fi
 
 info "===== 8. 配置 Samba ====="
@@ -170,18 +181,76 @@ else
     success "Samba 已经配置过, 跳过写入"
 fi
 
-echo "设置 Samba 密码为 123456"
-SAMBA_PASS="123456"
-(echo -e "$SAMBA_PASS\n$SAMBA_PASS" | sudo smbpasswd -s -a $USERNAME) > /dev/null 2>&1 || true
-sudo systemctl restart smbd
-success "Samba 配置完成"
+if [ -n "${SAMBA_PASS:-}" ]; then
+    echo "读取到环境变量 SAMBA_PASS, 执行自动配置..."
+elif [ "$INTERACTIVE" -eq 1 ]; then
+    echo -e "${CYAN}请为 Samba 共享用户 ($USERNAME) 设置访问密码${NC}"
+
+    # 开启循环, 直到两次输入一致或用户放弃
+    while true; do
+        read -s -p "请输入密码 (直接回车可跳过设置): " SAMBA_PASS
+        echo ""
+
+        # 如果用户直接按了回车, 留空跳过
+        if [ -z "$SAMBA_PASS" ]; then
+            echo -e "${YELLOW}用户选择跳过 Samba 密码设置。${NC}"
+            break
+        fi
+
+        read -s -p "请再次确认密码: " SAMBA_PASS_CONFIRM
+        echo ""
+
+        if [ "$SAMBA_PASS" == "$SAMBA_PASS_CONFIRM" ]; then
+            break # 密码一致, 跳出循环
+        else
+            echo -e "${RED}✖ 两次输入的密码不一致, 请重新输入! ${NC}"
+        fi
+    done
+else
+    echo -e "${YELLOW}检测到非交互模式且未提供环境变量, 跳过 Samba 密码设置。${NC}"
+    SAMBA_PASS=""
+fi
+
+# 只有当 SAMBA_PASS 不为空时, 才执行设置密码的操作
+if [ -n "$SAMBA_PASS" ]; then
+    (echo -e "$SAMBA_PASS\n$SAMBA_PASS" | sudo smbpasswd -s -a "$USERNAME") > /dev/null 2>&1 || true
+    sudo systemctl restart smbd
+    success "Samba 密码设置及服务重启完成"
+else
+    success "Samba 服务已启动 (未设置密码)"
+    echo -e "提示: 以后可随时执行 ${CYAN}sudo smbpasswd -a $USERNAME${NC} 手动设置密码。"
+fi
 
 info "===== 9. 配置 Git ====="
-# 切换为当前用户执行 git 配置, 防止配置文件属于 root
-git config --global user.name "aaronshqliu"
-git config --global user.email "aaron.shq.liu@outlook.com"
-git config --global credential.helper store
-success "Git 配置完成"
+if [ -n "${GIT_NAME:-}" ] &&[ -n "${GIT_EMAIL:-}" ]; then
+    echo "读取到环境变量，自动配置 Git..."
+    git config --global user.name "$GIT_NAME"
+    git config --global user.email "$GIT_EMAIL"
+    git config --global credential.helper store
+    success "Git 已配置为: $GIT_NAME <$GIT_EMAIL>"
+elif [ "$INTERACTIVE" -eq 1 ]; then
+    echo -ne "${CYAN}是否需要配置 Git 全局用户名和邮箱? (y/n) [n]: ${NC}"
+    read -r DO_GIT_CONFIG
+    DO_GIT_CONFIG=${DO_GIT_CONFIG:-n}
+
+    if [[ "$DO_GIT_CONFIG" =~ ^[Yy]$ ]]; then
+        read -p "请输入 Git 用户名 (user.name): " GIT_NAME
+        read -p "请输入 Git 邮箱 (user.email): " GIT_EMAIL
+
+        if [ -n "$GIT_NAME" ] && [ -n "$GIT_EMAIL" ]; then
+            git config --global user.name "$GIT_NAME"
+            git config --global user.email "$GIT_EMAIL"
+            git config --global credential.helper store
+            success "Git 身份已配置为: $GIT_NAME <$GIT_EMAIL>"
+        else
+            echo -e "${YELLOW}输入为空，已跳过 Git 配置${NC}"
+        fi
+    else
+        echo -e "${YELLOW}已跳过 Git 配置${NC}"
+    fi
+else
+    echo -e "${YELLOW}非交互模式，已跳过 Git 配置${NC}"
+fi
 
 echo -e "\n${GREEN}==========================================${NC}"
 echo -e "${GREEN}系统配置脚本全部执行完毕!${NC}"
