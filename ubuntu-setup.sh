@@ -11,15 +11,11 @@ set -euo pipefail
 # ==========================================
 # Global Configurations
 # ==========================================
-readonly SCRIPT_VERSION="3.1.0"
+readonly SCRIPT_VERSION="3.2.0"
 readonly CMAKE_VERSION="4.1.5"
 
 readonly TSINGHUA_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
 readonly GITHUB_HOSTS_URL="https://raw.hellogithub.com/hosts"
-
-# GitHub Proxy setting (can be changed if needed)
-readonly GH_PROXY="https://v6.gh-proxy.org/"
-readonly CMAKE_BASE_URL="${GH_PROXY}https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
 
 # Color definitions
 readonly COLOR_GREEN='\033[0;32m'
@@ -153,15 +149,11 @@ update_system_and_tools() {
     log_info "Configuring needrestart to avoid interactive daemon prompts..."
     sudo sed -i "s/^#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/g" /etc/needrestart/needrestart.conf || true
   fi
-  # Exporting variables to ensure silent installation
   export DEBIAN_FRONTEND=noninteractive
   export NEEDRESTART_MODE=a
 
   sudo apt-get clean
-  
-  # Use `|| log_warning` so that script doesn't crash on network failure
   retry_command sudo apt-get update || log_warning "APT update had issues, continuing anyway..."
-  
   sudo -E apt-get upgrade -y || log_warning "APT upgrade had issues, continuing anyway..."
 
   local packages=(
@@ -217,7 +209,6 @@ setup_github_hosts() {
     local temp_hosts="/tmp/github_hosts.txt"
     log_info "Fetching GitHub hosts..."
     
-    # Safe condition check, network failures here won't crash the script
     if curl -s -m 10 "${GITHUB_HOSTS_URL}" -o "${temp_hosts}"; then
       local hosts_content
       hosts_content="$(cat "${temp_hosts}")"
@@ -246,22 +237,39 @@ install_cmake_securely() {
     return 0
   fi
 
-  # Run in subshell. We use `exit 0` upon download failure inside subshell 
-  # so it exits gracefully without breaking the main script execution.
+  # Run in subshell to prevent directory pollution
   (
     cd /tmp || { log_warning "Cannot enter /tmp directory. Skipping CMake."; exit 0; }
     
     local tar_file="cmake-${CMAKE_VERSION}-linux-${SYS_ARCH}.tar.gz"
     local sha_file="cmake-${CMAKE_VERSION}-SHA-256.txt"
     
-    log_info "Downloading CMake binaries and SHA256 checksum..."
-    if ! retry_command curl -SLf --progress-bar -A "Mozilla/5.0" -o "${tar_file}" "${CMAKE_BASE_URL}/${tar_file}"; then
-      log_warning "Failed to download CMake binary package. Skipping CMake installation."
-      exit 0
-    fi
-    
-    if ! retry_command curl -SLf -A "Mozilla/5.0" -o "${sha_file}" "${CMAKE_BASE_URL}/${sha_file}"; then
-      log_warning "Failed to download CMake checksum file. Skipping CMake installation."
+    local proxies=(
+      "https://v6.gh-proxy.org/"
+      "https://github.cnxiaobai.com/"
+      "https://cdn.gh-proxy.org/"
+      "https://edgeone.gh-proxy.org/"
+      ""
+    )
+
+    local download_success=false
+    for proxy in "${proxies[@]}"; do
+      local base_url="${proxy}https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
+      local proxy_name="${proxy:-Official GitHub}"
+      log_info "Trying to download via: ${proxy_name}"
+      
+      if curl -SLf --progress-bar -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "${tar_file}" "${base_url}/${tar_file}" && \
+         curl -SLf -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "${sha_file}" "${base_url}/${sha_file}"; then
+        download_success=true
+        break
+      else
+        log_warning "Download failed with ${proxy_name}, trying next mirror..."
+        rm -f "${tar_file}" "${sha_file}"
+      fi
+    done
+
+    if [[ "${download_success}" != "true" ]]; then
+      log_warning "All download attempts failed (404/Timeout). Skipping CMake installation."
       exit 0
     fi
 
@@ -280,9 +288,8 @@ install_cmake_securely() {
     sudo ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-${SYS_ARCH}/bin/"* /usr/local/bin/
 
     rm -f "${tar_file}" "${sha_file}"
-  ) || true # Catch any unhandled subshell aborts to protect main script
+  ) || true
 
-  # Double check status
   if command -v cmake >/dev/null 2>&1 && cmake --version | grep -q "${CMAKE_VERSION}"; then
     log_success "CMake ${CMAKE_VERSION} installed successfully."
   else
@@ -293,7 +300,13 @@ install_cmake_securely() {
 setup_samba() {
   log_info "7. Configuring Samba Shared Folder"
   
-  local smb_conf="[Share]
+  echo -ne "${COLOR_YELLOW}Do you want to configure Samba shared folder for current user? (y/n) [n]: ${COLOR_NC}"
+  local apply_samba
+  read -r apply_samba
+  apply_samba="${apply_samba:-n}"
+
+  if [[ "${apply_samba}" =~ ^[Yy]$ ]]; then
+    local smb_conf="[Share]
    comment = Shared Folder
    path = ${USER_HOME}
    valid users = ${CURRENT_USER}
@@ -304,16 +317,19 @@ setup_samba() {
    available = yes
    browseable = yes"
 
-  update_config_block "/etc/samba/smb.conf" "USER_SHARE" "${smb_conf}" "true"
+    update_config_block "/etc/samba/smb.conf" "USER_SHARE" "${smb_conf}" "true"
 
-  log_info "Setting up Samba access password for user: ${CURRENT_USER}"
-  log_info "Press Enter directly if you want to skip password setup."
-  
-  if sudo smbpasswd -a "${CURRENT_USER}"; then
-    sudo systemctl restart smbd
-    log_success "Samba password set and service restarted."
+    log_info "Setting up Samba access password for user: ${CURRENT_USER}"
+    log_info "Press Enter directly if you want to skip password setup."
+    
+    if sudo smbpasswd -a "${CURRENT_USER}"; then
+      sudo systemctl restart smbd
+      log_success "Samba password set and service restarted."
+    else
+      log_warning "Samba password setup skipped or failed. Service is still running."
+    fi
   else
-    log_warning "Samba password setup skipped or failed. Service is still running."
+    log_info "Skipped Samba configuration."
   fi
 }
 
