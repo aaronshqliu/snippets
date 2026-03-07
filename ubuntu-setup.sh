@@ -11,7 +11,7 @@ set -euo pipefail
 # ==========================================
 # Global Configurations
 # ==========================================
-readonly SCRIPT_VERSION="3.3.0"
+readonly SCRIPT_VERSION="3.5.0"
 readonly CMAKE_VERSION="4.1.5"
 
 readonly TSINGHUA_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
@@ -144,7 +144,7 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"
 update_system_and_tools() {
   log_info "3. Updating system and installing basic tools..."
 
-  # === Bypass Ubuntu 22.04+ needrestart interactive prompt ===
+  # Bypass Ubuntu 22.04+ needrestart interactive prompt
   if [[ -f "/etc/needrestart/needrestart.conf" ]]; then
     log_info "Configuring needrestart to avoid interactive daemon prompts..."
     sudo sed -i "s/^#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/g" /etc/needrestart/needrestart.conf || true
@@ -208,7 +208,7 @@ setup_github_hosts() {
   if [[ "${apply_hosts}" =~ ^[Yy]$ ]]; then
     local temp_hosts="/tmp/github_hosts.txt"
     log_info "Fetching GitHub hosts..."
-    
+
     if curl -s -m 10 "${GITHUB_HOSTS_URL}" -o "${temp_hosts}"; then
       local hosts_content
       hosts_content="$(cat "${temp_hosts}")"
@@ -237,36 +237,44 @@ install_cmake_securely() {
     return 0
   fi
 
+  # Run in subshell to prevent main process interruption
   (
     cd /tmp || { log_warning "Cannot enter /tmp directory. Skipping CMake."; exit 0; }
 
     local tar_file="cmake-${CMAKE_VERSION}-linux-${SYS_ARCH}.tar.gz"
     local sha_file="cmake-${CMAKE_VERSION}-SHA-256.txt"
 
+    # Extract major.minor version for official CMake CDN
     local cmake_major_minor
     cmake_major_minor="$(echo "${CMAKE_VERSION}" | cut -d. -f1,2)"
 
+    # High-speed proxies first, official source as fallback
     local base_urls=(
-      "https://cmake.org/files/v${cmake_major_minor}"
-      "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
       "https://v6.gh-proxy.org/https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
       "https://github.cnxiaobai.com/https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
       "https://edgeone.gh-proxy.org/https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
+      "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
+      "https://cmake.org/files/v${cmake_major_minor}"
     )
 
     local download_success=false
+    # Masquerade as standard Windows Chrome to bypass WAF blocks
     local user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     for base_url in "${base_urls[@]}"; do
-      log_info "Trying to download from: ${base_url}"
+      # Extract domain for cleaner logging
+      local domain
+      domain=$(echo "${base_url}" | awk -F/ '{print $3}')
+      log_info "Downloading ${tar_file} from: ${domain}..."
 
-      if curl -SLf --progress-bar -A "${user_agent}" -o "${tar_file}" "${base_url}/${tar_file}" && \
-         curl -SLf -s -A "${user_agent}" -o "${sha_file}" "${base_url}/${sha_file}"; then
+      # Add timeout to prevent hanging on blocked nodes
+      if curl -SLf --connect-timeout 5 --progress-bar -A "${user_agent}" -o "${tar_file}" "${base_url}/${tar_file}" && \
+         curl -SLf --connect-timeout 5 -s -A "${user_agent}" -o "${sha_file}" "${base_url}/${sha_file}"; then
         download_success=true
         log_success "Download completed successfully."
         break
       else
-        log_warning "Download failed with this node (404 or Timeout). Trying the next one..."
+        log_warning "Node ${domain} failed or timed out. Switching..."
         rm -f "${tar_file}" "${sha_file}"
       fi
     done
@@ -291,7 +299,7 @@ install_cmake_securely() {
     sudo ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-${SYS_ARCH}/bin/"* /usr/local/bin/
 
     rm -f "${tar_file}" "${sha_file}"
-  ) || true 
+  ) || true
 
   if command -v cmake >/dev/null 2>&1 && cmake --version | grep -q "${CMAKE_VERSION}"; then
     log_success "CMake ${CMAKE_VERSION} installed successfully."
@@ -310,15 +318,15 @@ setup_samba() {
 
   if [[ "${apply_samba}" =~ ^[Yy]$ ]]; then
     local smb_conf="[Share]
-   comment = Shared Folder
-   path = ${USER_HOME}
-   valid users = ${CURRENT_USER}
-   directory mask = 0775
-   create mask = 0775
-   public = yes
-   writable = yes
-   available = yes
-   browseable = yes"
+      comment = Shared Folder
+      path = ${USER_HOME}
+      valid users = ${CURRENT_USER}
+      directory mask = 0775
+      create mask = 0775
+      public = yes
+      writable = yes
+      available = yes
+      browseable = yes"
 
     update_config_block "/etc/samba/smb.conf" "USER_SHARE" "${smb_conf}" "true"
 
@@ -382,7 +390,7 @@ main() {
   echo -e "\n${COLOR_GREEN}==========================================${COLOR_NC}"
   echo -e "${COLOR_GREEN}[OK] All configurations applied successfully!${COLOR_NC}"
   echo -e "Please run ${COLOR_CYAN}source ~/.bashrc${COLOR_NC} or restart your terminal to apply changes."
-  
+
   trap - ERR
   exit 0
 }
