@@ -2,7 +2,7 @@
 # ==============================================================================
 # Script Name: ubuntu-setup.sh
 # Description: Ubuntu Initialization Script (Interactive & ASCII-Only)
-# Environment: Ubuntu (x86_64 & aarch64)
+# Environment: Ubuntu 20.04/22.04/24.04 (x86_64 & aarch64)
 # ==============================================================================
 
 # Enable strict mode
@@ -11,15 +11,15 @@ set -euo pipefail
 # ==========================================
 # Global Configurations
 # ==========================================
-readonly SCRIPT_VERSION="3.0.0"
+readonly SCRIPT_VERSION="3.1.0"
 readonly CMAKE_VERSION="4.1.5"
-readonly PROXY_PORT="7890"
 
 readonly TSINGHUA_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
 readonly GITHUB_HOSTS_URL="https://raw.hellogithub.com/hosts"
 
 # GitHub Proxy setting (can be changed if needed)
 readonly GH_PROXY="https://gh-proxy.org/"
+readonly CMAKE_BASE_URL="${GH_PROXY}https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
 
 # Color definitions
 readonly COLOR_GREEN='\033[0;32m'
@@ -39,7 +39,7 @@ log_error()   { echo -e "${COLOR_RED}[FAIL] ${1}${COLOR_NC}" >&2; exit 1; }
 # Global error trap
 trap 'echo -e "${COLOR_RED}[FATAL] Script failed at line ${LINENO}! Please check the logs above.${COLOR_NC}" >&2' ERR
 
-# Retry mechanism with exponential backoff
+# Retry mechanism that returns 1 on failure instead of exiting the script
 retry_command() {
   local max_attempts=3
   local timeout=2
@@ -54,7 +54,8 @@ retry_command() {
     (( attempt++ ))
     (( timeout *= 2 ))
   done
-  log_error "Command '$1' failed after ${max_attempts} attempts."
+  log_warning "Command '$1' finally failed after ${max_attempts} attempts."
+  return 1
 }
 
 # Idempotent config block updater
@@ -146,10 +147,22 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"
 
 update_system_and_tools() {
   log_info "3. Updating system and installing basic tools..."
-  sudo apt-get clean
-  retry_command sudo apt-get update
   
-  sudo apt-get upgrade -y
+  # === Bypass Ubuntu 22.04+ needrestart interactive prompt ===
+  if [[ -f "/etc/needrestart/needrestart.conf" ]]; then
+    log_info "Configuring needrestart to avoid interactive daemon prompts..."
+    sudo sed -i "s/^#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/g" /etc/needrestart/needrestart.conf || true
+  fi
+  # Exporting variables to ensure silent installation
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
+
+  sudo apt-get clean
+  
+  # Use `|| log_warning` so that script doesn't crash on network failure
+  retry_command sudo apt-get update || log_warning "APT update had issues, continuing anyway..."
+  
+  sudo -E apt-get upgrade -y || log_warning "APT upgrade had issues, continuing anyway..."
 
   local packages=(
     vim git curl wget zip unzip tree build-essential ninja-build
@@ -157,8 +170,8 @@ update_system_and_tools() {
     openssh-server gnome-tweaks jq
   )
   
-  retry_command sudo apt-get install -y "${packages[@]}"
-  log_success "System update and tools installation completed."
+  retry_command sudo -E apt-get install -y "${packages[@]}" || log_warning "Some APT packages failed to install."
+  log_success "System update and tools installation phase completed."
 }
 
 setup_bashrc() {
@@ -184,12 +197,10 @@ parse_git_info() {
 
 export PS1="\[\e[1;32m\]\u\[\e[m\]@\[\e[1;31m\]\h\[\e[m\]:\[\e[33m\]\w\$(parse_git_info)\[\e[m\]\n$ "
 
-# Proxy Aliases
-alias proxy='export {http,https,all,HTTP,HTTPS,ALL}_proxy="http://127.0.0.1:__PROXY_PORT__"; echo "Proxy enabled -> 127.0.0.1:__PROXY_PORT__"'
+# Proxy Aliases (Hardcoded to 7890 as requested)
+alias proxy='export {http,https,all,HTTP,HTTPS,ALL}_proxy="http://127.0.0.1:7890"; echo "Proxy enabled -> 127.0.0.1:7890"'
 alias unproxy='unset {http,https,all,HTTP,HTTPS,ALL}_proxy; echo "Proxy disabled"'
 EOF
-
-  bashrc_content="${bashrc_content//__PROXY_PORT__/${PROXY_PORT}}"
 
   update_config_block "${USER_HOME}/.bashrc" "UBUNTU_SETUP_TERMINAL" "${bashrc_content}"
   log_success ".bashrc configuration applied."
@@ -205,6 +216,8 @@ setup_github_hosts() {
   if [[ "${apply_hosts}" =~ ^[Yy]$ ]]; then
     local temp_hosts="/tmp/github_hosts.txt"
     log_info "Fetching GitHub hosts..."
+    
+    # Safe condition check, network failures here won't crash the script
     if curl -s -m 10 "${GITHUB_HOSTS_URL}" -o "${temp_hosts}"; then
       local hosts_content
       hosts_content="$(cat "${temp_hosts}")"
@@ -233,20 +246,30 @@ install_cmake_securely() {
     return 0
   fi
 
+  # Run in subshell. We use `exit 0` upon download failure inside subshell 
+  # so it exits gracefully without breaking the main script execution.
   (
-    cd /tmp || log_error "Cannot enter /tmp directory."
+    cd /tmp || { log_warning "Cannot enter /tmp directory. Skipping CMake."; exit 0; }
     
     local tar_file="cmake-${CMAKE_VERSION}-linux-${SYS_ARCH}.tar.gz"
     local sha_file="cmake-${CMAKE_VERSION}-SHA-256.txt"
     
     log_info "Downloading CMake binaries and SHA256 checksum..."
-    readonly CMAKE_BASE_URL="${GH_PROXY}https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
-    retry_command wget -q --show-progress -O "${tar_file}" "${CMAKE_BASE_URL}/${tar_file}"
-    retry_command wget -q -O "${sha_file}" "${CMAKE_BASE_URL}/${sha_file}"
+    if ! retry_command wget -q --show-progress -O "${tar_file}" "${CMAKE_BASE_URL}/${tar_file}"; then
+      log_warning "Failed to download CMake binary package. Skipping CMake installation."
+      exit 0
+    fi
+    
+    if ! retry_command wget -q -O "${sha_file}" "${CMAKE_BASE_URL}/${sha_file}"; then
+      log_warning "Failed to download CMake checksum file. Skipping CMake installation."
+      exit 0
+    fi
 
     log_info "Verifying file integrity (SHA256)..."
     if ! grep "${tar_file}" "${sha_file}" | sha256sum -c - >/dev/null 2>&1; then
-      log_error "SECURITY ALERT: CMake SHA256 checksum failed! The file might be corrupted or tampered."
+      log_warning "SECURITY ALERT: CMake SHA256 checksum failed! Dropping downloaded files."
+      rm -f "${tar_file}" "${sha_file}"
+      exit 0
     fi
     log_success "Checksum verification passed."
 
@@ -257,13 +280,19 @@ install_cmake_securely() {
     sudo ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-${SYS_ARCH}/bin/"* /usr/local/bin/
 
     rm -f "${tar_file}" "${sha_file}"
-  )
-  log_success "CMake ${CMAKE_VERSION} installed successfully."
+  ) || true # Catch any unhandled subshell aborts to protect main script
+
+  # Double check status
+  if command -v cmake >/dev/null 2>&1 && cmake --version | grep -q "${CMAKE_VERSION}"; then
+    log_success "CMake ${CMAKE_VERSION} installed successfully."
+  else
+    log_warning "CMake installation was skipped or incomplete."
+  fi
 }
 
 setup_samba() {
   log_info "7. Configuring Samba Shared Folder"
-
+  
   local smb_conf="[Share]
    comment = Shared Folder
    path = ${USER_HOME}
@@ -279,7 +308,7 @@ setup_samba() {
 
   log_info "Setting up Samba access password for user: ${CURRENT_USER}"
   log_info "Press Enter directly if you want to skip password setup."
-
+  
   if sudo smbpasswd -a "${CURRENT_USER}"; then
     sudo systemctl restart smbd
     log_success "Samba password set and service restarted."
