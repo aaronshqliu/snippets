@@ -255,12 +255,12 @@ install_cmake_securely() {
     local sha_file="cmake-${CMAKE_VERSION}-SHA-256.txt"
     
     log_info "Downloading CMake binaries and SHA256 checksum..."
-    if ! retry_command wget -q --show-progress -O "${tar_file}" "${CMAKE_BASE_URL}/${tar_file}"; then
+    if ! retry_command curl -SLf --progress-bar -A "Mozilla/5.0" -o "${tar_file}" "${CMAKE_BASE_URL}/${tar_file}"; then
       log_warning "Failed to download CMake binary package. Skipping CMake installation."
       exit 0
     fi
     
-    if ! retry_command wget -q -O "${sha_file}" "${CMAKE_BASE_URL}/${sha_file}"; then
+    if ! retry_command curl -SLf -A "Mozilla/5.0" -o "${sha_file}" "${CMAKE_BASE_URL}/${sha_file}"; then
       log_warning "Failed to download CMake checksum file. Skipping CMake installation."
       exit 0
     fi
