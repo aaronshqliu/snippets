@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # Script Name: ubuntu-setup.sh
-# Description: Ubuntu Initialization Script (Interactive & ASCII-Only)
+# Description: Ubuntu Initialization Script
 # Environment: Ubuntu 20.04/22.04/24.04 (x86_64 & aarch64)
 # ==============================================================================
 
@@ -18,7 +18,7 @@ readonly TSINGHUA_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
 readonly GITHUB_HOSTS_URL="https://raw.hellogithub.com/hosts"
 
 # GitHub Proxy setting (can be changed if needed)
-readonly GH_PROXY="https://gh-proxy.org/"
+readonly GH_PROXY="https://v6.gh-proxy.org/"
 readonly CMAKE_BASE_URL="${GH_PROXY}https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
 
 # Color definitions
