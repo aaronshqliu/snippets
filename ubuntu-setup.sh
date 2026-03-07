@@ -11,7 +11,7 @@ set -euo pipefail
 # ==========================================
 # Global Configurations
 # ==========================================
-readonly SCRIPT_VERSION="3.2.0"
+readonly SCRIPT_VERSION="3.3.0"
 readonly CMAKE_VERSION="4.1.5"
 
 readonly TSINGHUA_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
@@ -87,7 +87,7 @@ check_environment() {
 
   readonly CURRENT_USER="$(whoami)"
   readonly USER_HOME="$(eval echo "~${CURRENT_USER}")"
-  
+
   if [[ -f "/etc/os-release" ]]; then
     readonly OS_CODENAME="$(source /etc/os-release && echo "${VERSION_CODENAME:-}")"
   else
@@ -109,7 +109,7 @@ check_environment() {
 
 setup_apt_mirrors() {
   log_info "2. Optimizing APT mirrors (Tsinghua Mirror)..."
-  
+
   if [[ -f "/etc/apt/sources.list.d/ubuntu.sources" ]]; then
     [[ ! -f "/etc/apt/sources.list.d/ubuntu.sources.bak" ]] && \
       sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
@@ -143,7 +143,7 @@ Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"
 
 update_system_and_tools() {
   log_info "3. Updating system and installing basic tools..."
-  
+
   # === Bypass Ubuntu 22.04+ needrestart interactive prompt ===
   if [[ -f "/etc/needrestart/needrestart.conf" ]]; then
     log_info "Configuring needrestart to avoid interactive daemon prompts..."
@@ -161,14 +161,14 @@ update_system_and_tools() {
     python3-pip pipx libssl-dev valgrind samba samba-common
     openssh-server gnome-tweaks jq
   )
-  
+
   retry_command sudo -E apt-get install -y "${packages[@]}" || log_warning "Some APT packages failed to install."
   log_success "System update and tools installation phase completed."
 }
 
 setup_bashrc() {
   log_info "4. Configuring terminal environment (.bashrc)..."
-  
+
   local bashrc_content
   read -r -d '' bashrc_content << 'EOF' || true
 # Git Info Prompt
@@ -189,7 +189,7 @@ parse_git_info() {
 
 export PS1="\[\e[1;32m\]\u\[\e[m\]@\[\e[1;31m\]\h\[\e[m\]:\[\e[33m\]\w\$(parse_git_info)\[\e[m\]\n$ "
 
-# Proxy Aliases (Hardcoded to 7890 as requested)
+# Proxy Aliases
 alias proxy='export {http,https,all,HTTP,HTTPS,ALL}_proxy="http://127.0.0.1:7890"; echo "Proxy enabled -> 127.0.0.1:7890"'
 alias unproxy='unset {http,https,all,HTTP,HTTPS,ALL}_proxy; echo "Proxy disabled"'
 EOF
@@ -213,7 +213,7 @@ setup_github_hosts() {
       local hosts_content
       hosts_content="$(cat "${temp_hosts}")"
       update_config_block "/etc/hosts" "GITHUB_HOSTS_520" "${hosts_content}" "true"
-      
+
       if command -v resolvectl >/dev/null 2>&1; then
         sudo resolvectl flush-caches || true
       elif command -v systemd-resolve >/dev/null 2>&1; then
@@ -231,45 +231,48 @@ setup_github_hosts() {
 
 install_cmake_securely() {
   log_info "6. Installing CMake ${CMAKE_VERSION} securely..."
-  
+
   if command -v cmake >/dev/null 2>&1 && cmake --version | grep -q "${CMAKE_VERSION}"; then
     log_success "CMake ${CMAKE_VERSION} is already installed, skipping."
     return 0
   fi
 
-  # Run in subshell to prevent directory pollution
   (
     cd /tmp || { log_warning "Cannot enter /tmp directory. Skipping CMake."; exit 0; }
-    
+
     local tar_file="cmake-${CMAKE_VERSION}-linux-${SYS_ARCH}.tar.gz"
     local sha_file="cmake-${CMAKE_VERSION}-SHA-256.txt"
-    
-    local proxies=(
-      "https://v6.gh-proxy.org/"
-      "https://github.cnxiaobai.com/"
-      "https://cdn.gh-proxy.org/"
-      "https://edgeone.gh-proxy.org/"
-      ""
+
+    local cmake_major_minor
+    cmake_major_minor="$(echo "${CMAKE_VERSION}" | cut -d. -f1,2)"
+
+    local base_urls=(
+      "https://cmake.org/files/v${cmake_major_minor}"
+      "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
+      "https://v6.gh-proxy.org/https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
+      "https://github.cnxiaobai.com/https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
+      "https://edgeone.gh-proxy.org/https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
     )
 
     local download_success=false
-    for proxy in "${proxies[@]}"; do
-      local base_url="${proxy}https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}"
-      local proxy_name="${proxy:-Official GitHub}"
-      log_info "Trying to download via: ${proxy_name}"
-      
-      if curl -SLf --progress-bar -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "${tar_file}" "${base_url}/${tar_file}" && \
-         curl -SLf -s -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "${sha_file}" "${base_url}/${sha_file}"; then
+    local user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+    for base_url in "${base_urls[@]}"; do
+      log_info "Trying to download from: ${base_url}"
+
+      if curl -SLf --progress-bar -A "${user_agent}" -o "${tar_file}" "${base_url}/${tar_file}" && \
+         curl -SLf -s -A "${user_agent}" -o "${sha_file}" "${base_url}/${sha_file}"; then
         download_success=true
+        log_success "Download completed successfully."
         break
       else
-        log_warning "Download failed with ${proxy_name}, trying next mirror..."
+        log_warning "Download failed with this node (404 or Timeout). Trying the next one..."
         rm -f "${tar_file}" "${sha_file}"
       fi
     done
 
     if [[ "${download_success}" != "true" ]]; then
-      log_warning "All download attempts failed (404/Timeout). Skipping CMake installation."
+      log_warning "All CMake download attempts failed. Skipping CMake installation."
       exit 0
     fi
 
@@ -288,7 +291,7 @@ install_cmake_securely() {
     sudo ln -sf "/opt/cmake-${CMAKE_VERSION}-linux-${SYS_ARCH}/bin/"* /usr/local/bin/
 
     rm -f "${tar_file}" "${sha_file}"
-  ) || true
+  ) || true 
 
   if command -v cmake >/dev/null 2>&1 && cmake --version | grep -q "${CMAKE_VERSION}"; then
     log_success "CMake ${CMAKE_VERSION} installed successfully."
@@ -299,7 +302,7 @@ install_cmake_securely() {
 
 setup_samba() {
   log_info "7. Configuring Samba Shared Folder"
-  
+
   echo -ne "${COLOR_YELLOW}Do you want to configure Samba shared folder for current user? (y/n) [n]: ${COLOR_NC}"
   local apply_samba
   read -r apply_samba
@@ -321,10 +324,10 @@ setup_samba() {
 
     log_info "Setting up Samba access password for user: ${CURRENT_USER}"
     log_info "Press Enter directly if you want to skip password setup."
-    
+
     if sudo smbpasswd -a "${CURRENT_USER}"; then
       sudo systemctl restart smbd
-      log_success "Samba password set and service restarted."
+      log_success "Samba configured and service restarted."
     else
       log_warning "Samba password setup skipped or failed. Service is still running."
     fi
@@ -335,7 +338,7 @@ setup_samba() {
 
 setup_git() {
   log_info "8. Configuring Git Global Settings"
-  
+
   echo -ne "${COLOR_YELLOW}Do you want to configure global Git user.name and user.email? (y/n) [n]: ${COLOR_NC}"
   local do_config
   read -r do_config
