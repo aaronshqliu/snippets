@@ -42,43 +42,22 @@ update_config_block() {
   echo -e "${start_mark}\n${content}\n${end_mark}" >> "${file}"
 }
 
-# Displays a spinning animation while a background process runs.
-show_spinner() {
-  local pid="$1"
-  local msg="$2"
-  
-  # Degrade gracefully if not running in a terminal (e.g., CI/CD)
-  if [[ ! -t 1 ]]; then
-    echo "[INFO] ${msg} (Please wait...)"
-    wait "${pid}" 2>/dev/null || true
-    return
-  fi
-
-  local spin='-\|/'
-  local i=0
-  while kill -0 "${pid}" 2>/dev/null; do
-    i=$(( (i + 1) % 4 ))
-    printf "\r${COLOR_CYAN}[%c]${COLOR_RESET} %s" "${spin:$i:1}" "${msg}"
-    sleep 0.1
-  done
-  printf "\r\033[K"
-}
-
 # ==========================================
 # Core Modules
 # ==========================================
 # Verifies OS architecture and execution privileges.
 check_environment() {
   log_info "1. Checking environment..."
-  
+
   if [[ "${EUID}" -eq 0 ]]; then
     log_error "Please run this script as a normal user with sudo privileges, not root."
   fi
-  
+
   if [[ "$(uname -m)" != "x86_64" ]]; then
     log_error "This script exclusively targets x86_64 architecture."
   fi
-  
+
+  # Cache sudo credentials upfront
   sudo -v || log_error "Failed to obtain sudo privileges."
   log_success "Environment check passed: ${CURRENT_USER} @ x86_64"
 }
@@ -86,13 +65,13 @@ check_environment() {
 # Configures APT to use the Tsinghua University mirror for faster downloads.
 setup_apt_mirrors() {
   log_info "2. Optimizing APT mirrors..."
-  
+
   # For Ubuntu 24.04+ (DEB822 format)
   if [[ -f "/etc/apt/sources.list.d/ubuntu.sources" ]]; then
     if [[ ! -f "/etc/apt/sources.list.d/ubuntu.sources.bak" ]]; then
       sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
     fi
-    
+
     sudo tee /etc/apt/sources.list.d/ubuntu.sources > /dev/null <<EOF
 Types: deb
 URIs: ${TSINGHUA_MIRROR}
@@ -112,7 +91,7 @@ EOF
     if [[ ! -f "/etc/apt/sources.list.bak" ]]; then
       sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
     fi
-    
+
     sudo tee /etc/apt/sources.list > /dev/null <<EOF
 deb ${TSINGHUA_MIRROR} ${OS_CODENAME} main restricted universe multiverse
 deb ${TSINGHUA_MIRROR} ${OS_CODENAME}-updates main restricted universe multiverse
@@ -156,9 +135,8 @@ update_system_and_tools() {
     libssl-dev protobuf-compiler libprotobuf-dev zookeeper zookeeperd libzookeeper-mt-dev
   )
 
-  local log_file="/tmp/ubuntu-setup-apt.log"
-  sudo -E apt-get install -y "${packages[@]}" > "${log_file}" 2>&1 &
-  show_spinner "$!" "Installing packages (log: ${log_file})..."
+  sudo -E apt-get install -y "${packages[@]}"
+
   log_success "Toolchain installed."
 }
 
