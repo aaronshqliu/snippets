@@ -256,7 +256,6 @@ main() {
 
   echo -e "\n${COLOR_GREEN}[OK] Setup applied successfully!${COLOR_RESET}"
   echo -e "Run ${COLOR_CYAN}source ~/.bashrc${COLOR_RESET} or restart your terminal to apply changes."
-  echo -e "Note: You may need to re-login for Docker group permissions to take effect."
 }
 
 main "$@"
